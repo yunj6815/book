@@ -1,95 +1,119 @@
 import streamlit as st
-import pandas as pd
 import requests
+from bs4 import BeautifulSoup
+import pandas as pd
 import time
 
-# 🔑 네이버 API 마스터키
-# 큰따옴표("") 안에 공백 없이 정확히 키만 붙여넣고 반드시 저장(Ctrl+S)해 주세요!
-CLIENT_ID = "CeoJyvYZXRWXsoCAChtj"
-CLIENT_SECRET = "jTS0iTfm1W"
+# 평점 문자열을 숫자로 변환하기 위한 딕셔너리
+RATING_MAPPING = {
+    "One": 1,
+    "Two": 2,
+    "Three": 3,
+    "Four": 4,
+    "Five": 5
+}
 
 
-def get_book_info(query):
-    """네이버 도서 검색 API를 통해 도서 정보를 가져옵니다."""
-    url = "https://openapi.naver.com/v1/search/book.json"
-    headers = {
-        "X-Naver-Client-Id": CLIENT_ID,
-        "X-Naver-Client-Secret": CLIENT_SECRET
-    }
-    params = {"query": query, "display": 1}
+def scrape_books_data():
+    books_data = []
 
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        data = response.json()
+    # 진행 상태를 표시하기 위한 Streamlit 요소
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-        # 1. API 키 오류 등 네이버에서 거절한 경우 명확한 에러 출력
-        if 'errorMessage' in data:
-            return f"인증 에러 (키 확인 필요)", f"에러코드: {data.get('errorCode')}", "-"
+    # 전체 50페이지 스크래핑 (총 1000권)
+    total_pages = 50
 
-        # 2. 검색 결과가 있는 경우
-        if data.get('items'):
-            item = data['items'][0]
-            # 네이버는 도서 API에서 정가(price) 제공을 중단하고 판매가(discount)만 제공하는 경우가 많습니다.
-            return item.get('discount', '정보 없음'), item.get('discount', '정보 없음'), item.get('title', '-').replace('<b>',
-                                                                                                                '').replace(
-                '</b>', '')
+    for page in range(1, total_pages + 1):
+        url = f"https://books.toscrape.com/catalogue/page-{page}.html"
+        response = requests.get(url)
 
-        # 3. 검색 결과가 없는 경우
-        return "결과 없음", "결과 없음", "-"
+        if response.status_code != 200:
+            st.error(f"{page} 페이지를 불러오는 데 실패했습니다.")
+            break
 
-    except Exception as e:
-        return "네트워크/통신 오류", "-", "-"
+        soup = BeautifulSoup(response.content, "html.parser")
+        articles = soup.find_all("article", class_="product_pod")
+
+        for article in articles:
+            # 1. 도서 제목 추출
+            title = article.h3.a["title"]
+
+            # 2. 가격 추출 (문자열에서 '£' 및 특수문자 제거 후 실수형으로 변환)
+            price_str = article.find("p", class_="price_color").text
+            price = float(price_str.replace("£", "").replace("Â", "").strip())
+
+            # 3. 평점 추출
+            rating_class = article.find("p", class_="star-rating")["class"][1]
+            rating = RATING_MAPPING.get(rating_class, 0)
+
+            books_data.append({
+                "도서명": title,
+                "가격(£)": price,
+                "평점": rating
+            })
+
+        # 진행률 업데이트
+        progress_bar.progress(page / total_pages)
+        status_text.text(f"데이터 수집 중... ({page}/{total_pages} 페이지 완료)")
+
+    status_text.text("✅ 데이터 수집이 완료되었습니다!")
+    time.sleep(1)  # 완료 메시지를 잠시 보여주기 위한 대기
+    status_text.empty()  # 상태 텍스트 초기화
+    progress_bar.empty()  # 프로그레스 바 초기화
+
+    return pd.DataFrame(books_data)
 
 
-# 스트림릿 페이지 설정
-st.set_page_config(page_title="도서 정가 검색기", layout="wide")
-st.title("📚 도서 데이터 통합 정가 검색기")
+# --- 화면 구성 ---
 
-uploaded_file = st.file_uploader("파일을 선택하세요 (CSV 또는 XLSX)", type=['csv', 'xlsx'])
+# 사이트 제목
+st.set_page_config(page_title="도서 데이터 분석기", page_icon="📚", layout="wide")
+st.title("📚 Books to Scrape 데이터 수집 및 분석")
+st.write("버튼을 누르면 [books.toscrape.com](https://books.toscrape.com/) 사이트의 모든 도서 데이터를 수집합니다.")
 
-if uploaded_file:
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
+# 데이터 수집 버튼
+if st.button("도서 데이터 수집 시작", type="primary"):
+    with st.spinner("데이터를 가져오는 중입니다. 잠시만 기다려주세요..."):
+        # 스크래핑 함수 실행
+        df = scrape_books_data()
+
+    if not df.empty:
+        st.success("총 1,000권의 도서 데이터를 성공적으로 수집했습니다!")
+
+        # 데이터 분석 (총 도서 수, 평균 가격, 평균 평점 계산)
+        total_books = len(df)
+        avg_price = df["가격(£)"].mean()
+        avg_rating = df["평점"].mean()
+
+        # 지표(Metrics) 표시
+        st.markdown("### 📊 데이터 요약")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("총 도서 수", f"{total_books:,} 권")
+        col2.metric("평균 가격", f"£ {avg_price:.2f}")
+        col3.metric("평균 평점", f"{avg_rating:.2f} 점")
+
+        st.markdown("---")
+
+        # 상세 데이터 표시
+        st.markdown("### 📖 수집된 도서 상세 정보")
+        # 데이터프레임을 인터랙티브한 표 형태로 출력
+        st.dataframe(
+            df,
+            use_container_width=True,
+            column_config={
+                "가격(£)": st.column_config.NumberColumn(format="£ %.2f"),
+                "평점": st.column_config.NumberColumn(format="%d 점")
+            }
+        )
+
+        # CSV 다운로드 버튼 (선택 사항)
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="수집된 데이터 CSV로 다운로드",
+            data=csv,
+            file_name='scraped_books.csv',
+            mime='text/csv',
+        )
     else:
-        df = pd.read_excel(uploaded_file, engine='openpyxl')
-
-    st.write("📋 업로드된 데이터 확인:", df.head())
-
-    required_cols = ['책제목', '저자']
-    if all(col in df.columns for col in required_cols):
-        if st.button("🔍 정가 검색 시작"):
-
-            # 💡 수정 포인트: 검색 조건을 느슨하게 (책제목 + 저자 만으로 검색)
-            df['검색키워드'] = df['책제목'].astype(str) + " " + df['저자'].astype(str)
-
-            prices, discounts, found_titles = [], [], []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            for i, query in enumerate(df['검색키워드']):
-                p, d, t = get_book_info(query)
-                prices.append(p)
-                discounts.append(d)
-                found_titles.append(t)
-
-                time.sleep(0.1)
-                progress_bar.progress((i + 1) / len(df))
-                status_text.text(f"진행 중: {i + 1}/{len(df)} 권 완료")
-
-            df['API_조회_제목'] = found_titles
-            df['정가'] = prices
-            df['판매가'] = discounts
-
-            st.success("조사가 완료되었습니다!")
-            final_df = df.drop(columns=['검색키워드'])
-            st.dataframe(final_df)
-
-            csv_data = final_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 결과 파일 다운로드 (CSV)",
-                data=csv_data,
-                file_name="book_price_results.csv",
-                mime="text/csv"
-            )
-    else:
-        st.error("파일에 '책제목', '저자', '출판사' 컬럼이 모두 포함되어 있는지 확인해 주세요.")
+        st.error("데이터 수집에 실패했습니다.")
